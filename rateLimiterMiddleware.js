@@ -1,5 +1,7 @@
 const TokenBucket = require("./tokenBucket");
 const { client } = require("./redisClient");
+const logger = require("./logger");
+const { recordAllowed, recordBlocked } = require("./metrics");
 
 const CAPACITY = 10;
 const REFILL_RATE = 1;
@@ -7,6 +9,7 @@ const REFILL_RATE = 1;
 async function rateLimiter(req, res, next) {
   const ip = req.ip;
   const key = `rate_limit:${ip}`;
+  const start = Date.now();
 
   try {
     const now = Date.now();
@@ -16,7 +19,6 @@ async function rateLimiter(req, res, next) {
     let bucket;
 
     if (!data) {
-      // First time user → create bucket
       bucket = new TokenBucket(CAPACITY, REFILL_RATE);
     } else {
       const parsed = JSON.parse(data);
@@ -28,7 +30,6 @@ async function rateLimiter(req, res, next) {
 
     const allowed = bucket.consume();
 
-    // Save updated bucket to Redis
     await client.set(
       key,
       JSON.stringify({
@@ -37,18 +38,36 @@ async function rateLimiter(req, res, next) {
       })
     );
 
+    const duration = Date.now() - start;
+
     if (allowed) {
-      console.log(`Allowed request from ${ip}`);
+      recordAllowed();
+
+      logger.info({
+        ip,
+        endpoint: req.originalUrl,
+        status: "allowed",
+        durationMs: duration,
+      });
+
       next();
     } else {
-      console.log(` Blocked request from ${ip}`);
+      recordBlocked();
+
+      logger.warn({
+        ip,
+        endpoint: req.originalUrl,
+        status: "blocked",
+        durationMs: duration,
+      });
+
       res.status(429).json({
         message: "Too Many Requests",
       });
     }
   } catch (err) {
-    console.error("Rate limiter error:", err);
-    next(); // fail open
+    logger.error({ err }, "Rate limiter error");
+    next();
   }
 }
 
